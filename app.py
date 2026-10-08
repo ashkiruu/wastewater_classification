@@ -1,31 +1,29 @@
 import os
-import cv2
-import numpy as np
-import tensorflow as tf
-from flask import Flask, render_template, Response, jsonify, request, url_for
-from collections import deque
-from PIL import Image
-from werkzeug.utils import secure_filename
+import io
 import json
+import base64
+import numpy as np
+import onnxruntime as ort
+from flask import Flask, render_template, jsonify, request
+from PIL import Image, UnidentifiedImageError
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
-app.secret_key = "ecoscan_secret_key"
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
+# Vercel rejects request bodies over 4.5 MB; fail early with a friendly message.
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
 # --- Configuration & Model Load ---
-MODEL_PATH = "waste_classifier_mobilenetv2.keras"
+# The Keras model is exported to ONNX so the deployed app doesn't need TensorFlow.
+# Regenerate it with scripts/export_onnx.py after retraining.
+MODEL_PATH = os.path.join(BASE_DIR, "waste_classifier.onnx")
 CLASS_NAMES = ["battery", "biological", "cardboard", "clothes", "glass", "metal", "paper", "plastic", "shoes", "trash"]
-model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+INPUT_NAME = session.get_inputs()[0].name
 
-# File Paths
-UPLOAD_FOLDER = os.path.join('static', 'uploads')
-TEST_FOLDER = os.path.join('static', 'manual_dataset')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Smoothing & Optimization
-smoother_window = deque(maxlen=10)
-PREDICT_EVERY_N_FRAMES = 3
-frame_count = 0
-last_results = {"class": "Initializing...", "conf": 0.0, "top3": []}
+# Read-only on Vercel: nothing is ever written to disk.
+TEST_FOLDER = os.path.join(BASE_DIR, 'static', 'manual_dataset')
 
 
 # =============================================================================
@@ -219,61 +217,29 @@ WASTE_INFO = {
 }
 
 
+
+
 # =============================================================================
-# PREPROCESSING HELPERS
+# INFERENCE HELPERS
 # =============================================================================
 
-def preprocess_frame(frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    resized = cv2.resize(rgb, (224, 224))
-    img_array = np.array(resized, dtype=np.float32)
-    return np.expand_dims(img_array, axis=0)
-
-def preprocess_file(image_path):
-    img = Image.open(image_path).convert("RGB")
+def preprocess_image(source):
+    """source: a file path or file-like object. Returns a (1, 224, 224, 3) float32 array in [0, 255]."""
+    img = Image.open(source).convert("RGB")
     img = img.resize((224, 224))
-    img_array = np.array(img, dtype=np.float32)
-    return np.expand_dims(img_array, axis=0)
+    return np.expand_dims(np.array(img, dtype=np.float32), axis=0)
 
+def predict_probs(img_arr):
+    """Returns the 10 class probabilities for a preprocessed image."""
+    return session.run(None, {INPUT_NAME: img_arr})[0][0]
 
-# =============================================================================
-# LIVE FEED GENERATOR
-# =============================================================================
-
-def gen_frames():
-    global frame_count, last_results
-    cap = cv2.VideoCapture(0)
-
-    while True:
-        success, frame = cap.read()
-        if not success:
-            break
-
-        frame_count += 1
-
-        if frame_count % PREDICT_EVERY_N_FRAMES == 0:
-            preprocessed = preprocess_frame(frame)
-            preds = model(preprocessed, training=False).numpy()[0]
-            smoother_window.append(preds)
-
-            if len(smoother_window) >= 3:
-                avg_preds = np.mean(smoother_window, axis=0)
-                top_idx = np.argmax(avg_preds)
-                top3_indices = np.argsort(avg_preds)[::-1][:3]
-
-                last_results = {
-                    "class": CLASS_NAMES[top_idx],
-                    "conf": float(avg_preds[top_idx]),
-                    "top3": [(CLASS_NAMES[i], float(avg_preds[i])) for i in top3_indices]
-                }
-
-        color = (0, 255, 0) if last_results["conf"] > 0.6 else (0, 165, 255)
-        cv2.putText(frame, f"{last_results['class'].upper()} ({last_results['conf']*100:.1f}%)",
-                    (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
-        ret, buffer = cv2.imencode('.jpg', frame)
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+def make_preview(raw_bytes, max_side=512):
+    """Small base64 JPEG data URI so an upload can be shown without saving it."""
+    img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 # =============================================================================
@@ -286,20 +252,21 @@ def index():
 
 @app.route('/live')
 def live_mode():
-    return render_template('live.html')
+    # The browser captures the camera and sends frames to /predict, so the
+    # disposal info is handed to the page once instead of per request.
+    return render_template('live.html', waste_info=WASTE_INFO)
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/data')
-def data():
-    """Returns current prediction + waste info for live.html JavaScript."""
-    result = dict(last_results)
-    # Attach waste info for the detected class
-    cls = result.get("class", "")
-    result["info"] = WASTE_INFO.get(cls, None)
-    return jsonify(result)
+@app.route('/predict', methods=['POST'])
+def predict():
+    """Classifies one JPEG/PNG frame posted as the raw request body (live mode)."""
+    raw = request.get_data()
+    if not raw:
+        return jsonify(error="No image data received."), 400
+    try:
+        probs = predict_probs(preprocess_image(io.BytesIO(raw)))
+    except (UnidentifiedImageError, OSError):
+        return jsonify(error="Could not read that image."), 400
+    return jsonify(classes=CLASS_NAMES, probs=[float(p) for p in probs])
 
 @app.route('/evaluation')
 def evaluation_report():
@@ -313,6 +280,10 @@ def evaluation_report():
         with open(json_path, 'r') as f:
             stats = json.load(f)
     return render_template('evaluation_report.html', stats=stats)
+
+@app.errorhandler(413)
+def too_large(_e):
+    return render_template('manual.html', error="That image is too large (max 4 MB). Try a smaller photo."), 413
 
 @app.route('/manual', methods=['GET', 'POST'])
 def manual_mode():
@@ -333,30 +304,32 @@ def manual_mode():
             for img_name in test_images:
                 path = os.path.join(TEST_FOLDER, img_name)
                 if os.path.exists(path):
-                    img_arr = preprocess_file(path)
-                    preds = model.predict(img_arr, verbose=0)[0]
+                    preds = predict_probs(preprocess_image(path))
                     top_idx = np.argmax(preds)
                     cls = CLASS_NAMES[top_idx]
+                    with open(path, "rb") as fh:
+                        thumb = make_preview(fh.read(), max_side=200)
                     batch_results.append({
                         "filename":         img_name,
                         "top1_class":       cls,
                         "top1_confidence":  round(float(preds[top_idx]) * 100, 2),
-                        "url":              url_for('static', filename=f'manual_dataset/{img_name}'),
+                        "url":              thumb,
                         "is_uncertain":     float(preds[top_idx]) < 0.60,
                         "info":             WASTE_INFO.get(cls),
                     })
             return render_template('manual.html', batch_results=batch_results)
 
-        # --- Handle User Upload ---
+        # --- Handle User Upload (processed in memory, never saved) ---
         if 'file' in request.files:
             file = request.files['file']
             if file.filename != '':
-                filename = secure_filename(file.filename)
-                filepath = os.path.join(UPLOAD_FOLDER, filename)
-                file.save(filepath)
+                raw = file.read()
+                try:
+                    preds = predict_probs(preprocess_image(io.BytesIO(raw)))
+                    image_url = make_preview(raw)
+                except (UnidentifiedImageError, OSError):
+                    return render_template('manual.html', error="That file isn't a readable image."), 400
 
-                img_arr = preprocess_file(filepath)
-                preds = model.predict(img_arr, verbose=0)[0]
                 top1_idx = np.argmax(preds)
                 top3_indices = np.argsort(preds)[::-1][:3]
                 cls = CLASS_NAMES[top1_idx]
@@ -368,10 +341,9 @@ def manual_mode():
                     "is_uncertain":     float(preds[top1_idx]) < 0.60,
                     "info":             WASTE_INFO.get(cls),
                 }
-                image_url = url_for('static', filename=f'uploads/{filename}')
 
     return render_template('manual.html', result=result, image_url=image_url)
 
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='127.0.0.1', port=5000, debug=True)

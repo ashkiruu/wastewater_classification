@@ -1,0 +1,10 @@
+# Only needed for training / evaluating / exporting the model locally.
+# The deployed web app uses requirements.txt (Flask + ONNX Runtime).
+-r requirements.txt
+tensorflow>=2.9.0
+matplotlib>=3.5.0
+scikit-learn>=1.1.0
+seaborn>=0.11.0
+opencv-python>=4.6.0
+tf2onnx>=1.16.0
+onnx>=1.16.0

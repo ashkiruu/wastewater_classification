@@ -1,0 +1,10 @@
+.git
+archive
+dataset_split
+__pycache__
+scripts
+static/uploads
+*.keras
+*.png
+README.md
+requirements-train.txt

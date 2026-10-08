@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app.py": {
+      "excludeFiles": "{archive/**,dataset_split/**,scripts/**,static/uploads/**,*.keras,*.png}"
+    }
+  }
+}

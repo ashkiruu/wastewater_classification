@@ -25,11 +25,19 @@
             <!-- Webcam (2 cols) -->
             <div class="lg:col-span-2 relative">
                 <div class="rounded-3xl overflow-hidden border-4 border-slate-800 shadow-2xl bg-black aspect-video flex items-center justify-center">
-                    <img src="{{ url_for('video_feed') }}" class="w-full h-full object-cover" alt="Webcam Stream">
+                    <video id="cam" class="w-full h-full object-cover" autoplay muted playsinline></video>
+                    <canvas id="grab" width="224" height="224" class="hidden"></canvas>
+                    <div id="camStatus" class="absolute inset-0 flex flex-col items-center justify-center gap-4 text-center p-6">
+                        <p id="camMsg" class="text-slate-300 text-sm">Your browser will ask for camera access.</p>
+                        <button id="camStart" type="button"
+                                class="px-6 py-3 bg-green-500 hover:bg-green-600 text-slate-900 rounded-xl font-bold transition-colors">
+                            Start Camera
+                        </button>
+                    </div>
                 </div>
                 <div class="absolute top-4 left-4">
                     <div class="bg-black/60 backdrop-blur-md px-4 py-2 rounded-xl border border-white/10">
-                        <span id="mainLabel" class="text-xl font-bold text-green-400 tracking-wide">Initializing...</span>
+                        <span id="mainLabel" class="text-xl font-bold text-green-400 tracking-wide">Camera off</span>
                     </div>
                 </div>
             </div>
@@ -47,7 +55,7 @@
                     <h3 class="text-green-400 font-bold mb-2 text-sm">Optimization Active</h3>
                     <p class="text-[11px] text-green-200/70 leading-relaxed uppercase tracking-wider">
                         Smoothing: 10 Frames <br>
-                        Inference: Every 3rd Frame
+                        Inference: ~3 Frames / Second
                     </p>
                 </div>
             </div>
@@ -165,11 +173,77 @@
             document.getElementById('infoYoutubeLabel').textContent = info.youtube_label;
         }
 
-        setInterval(async () => {
-            try {
-                const res  = await fetch('/data');
-                const data = await res.json();
+        // ── Browser-side capture ──────────────────────────────────────────────
+        // The camera is read in the browser (a Vercel function has no webcam).
+        // One 224x224 frame is POSTed to /predict, and the 10 most recent
+        // probability vectors are averaged here to keep the label from flickering.
+        const WASTE_INFO     = {{ waste_info | tojson }};
+        const SMOOTH_WINDOW  = 10;
+        const FRAME_DELAY_MS = 300;
+        const recent = [];
 
+        const video  = document.getElementById('cam');
+        const grab   = document.getElementById('grab');
+        const ctx    = grab.getContext('2d');
+        const camMsg = document.getElementById('camMsg');
+        const camBtn = document.getElementById('camStart');
+        let running  = false;
+
+        camBtn.addEventListener('click', async () => {
+            camBtn.disabled = true;
+            camMsg.textContent = 'Requesting camera…';
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: 'environment' } }, audio: false
+                });
+                video.srcObject = stream;
+                await video.play();
+                document.getElementById('camStatus').classList.add('hidden');
+                running = true;
+                loop();
+            } catch (e) {
+                camBtn.disabled = false;
+                camMsg.textContent = 'Camera unavailable: ' + (e.message || e.name) +
+                    '. Allow camera access in your browser and try again.';
+            }
+        });
+
+        function frameBlob() {
+            ctx.drawImage(video, 0, 0, 224, 224);
+            return new Promise(res => grab.toBlob(res, 'image/jpeg', 0.9));
+        }
+
+        async function loop() {
+            while (running) {
+                try {
+                    if (video.readyState >= 2) {
+                        const blob = await frameBlob();
+                        const r = await fetch('/predict', { method: 'POST', body: blob });
+                        if (r.ok) update((await r.json()));
+                    }
+                } catch (e) { console.log('Retrying...'); }
+                await new Promise(r => setTimeout(r, FRAME_DELAY_MS));
+            }
+        }
+
+        function update(pred) {
+            recent.push(pred.probs);
+            if (recent.length > SMOOTH_WINDOW) recent.shift();
+            if (recent.length < 3) return;
+
+            const avg = pred.probs.map((_, i) => recent.reduce((s, p) => s + p[i], 0) / recent.length);
+            const order = avg.map((p, i) => i).sort((a, b) => avg[b] - avg[a]);
+            const data = {
+                class: pred.classes[order[0]],
+                conf:  avg[order[0]],
+                top3:  order.slice(0, 3).map(i => [pred.classes[i], avg[i]]),
+                info:  WASTE_INFO[pred.classes[order[0]]] || null,
+            };
+            render(data);
+        }
+
+        function render(data) {
+            try {
                 // Main label
                 const mainLabel = document.getElementById('mainLabel');
                 if (data.class) {
@@ -200,8 +274,8 @@
                     renderInfoCard(data.info);
                 }
 
-            } catch(e) { console.log("Retrying..."); }
-        }, 200);
+            } catch(e) { console.log("Render error", e); }
+        }
     </script>
 </body>
 </html>

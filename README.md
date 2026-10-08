@@ -130,7 +130,7 @@ taken with a phone camera under natural lighting.
 ```
 Here is the updated Project Structure section for your README.md. I have integrated the Flask backend and the required templates folder while maintaining the original organization.
 
-CS124P_IC/
+wastewater_classification/
 │
 ├── app.py                      # Flask Main Entry (Web Server)
 ├── waste_classifier_mobilenetv2.keras  # Final Trained Model
@@ -170,8 +170,8 @@ CS124P_IC/
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/CS124P_IC.git
-cd CS124P_IC
+git clone https://github.com/ashkiruu/wastewater_classification.git
+cd wastewater_classification
 ```
 
 ### 2. Create a virtual environment (recommended)
@@ -232,19 +232,35 @@ Edit the `IMAGE_PATH` or `test_images` list inside `main()` to test your own ima
 ## 📷 Real-Time Webcam
 
 ```bash
+pip install -r requirements.txt
 python app.py
 ```
 
-- Hold a waste item in front of your webcam
+Open http://127.0.0.1:5000/live and click **Start Camera**.
+
+- The browser captures the camera and sends a small frame to `/predict` about 3 times per second
 - Predicted class and confidence appear on screen
 - Top-3 predictions shown with confidence bars
-- **UNCERTAIN** banner appears if confidence < 60%
-- Press **Q** to quit
+- Low-confidence results (< 60%) are shown in orange
+- The last 10 predictions are averaged in the browser to eliminate flickering
 
-**CPU optimization features:**
-- Predicts every 3rd frame (not every frame) for smooth video
-- 10-frame prediction smoother to eliminate flickering
-- Direct `model()` call instead of `model.predict()` for lower latency
+The web app runs the model through **ONNX Runtime** (`waste_classifier.onnx`), not
+TensorFlow, so it stays small enough to deploy. Re-generate it after retraining with
+`python scripts/export_onnx.py` (install `requirements-train.txt` first).
+
+---
+
+## 🚀 Deploying to Vercel
+
+1. Push this repo to GitHub (the `archive/` and `dataset_split/` folders are git-ignored).
+2. On [vercel.com](https://vercel.com) choose **Add New → Project** and import the repo.
+3. Keep the detected **Flask** preset; no build or install command is needed.
+4. Add an environment variable `SECRET_KEY` with any long random string.
+5. Click **Deploy**. Both `/manual` and `/live` work (the camera needs HTTPS, which Vercel provides).
+
+Or from a terminal: `npm i -g vercel`, then `vercel` (preview) / `vercel --prod`.
+
+Uploads are classified in memory and never saved, and are limited to 4 MB.
 
 ---
 

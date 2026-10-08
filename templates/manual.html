@@ -13,6 +13,12 @@
             <h1 class="text-3xl font-black tracking-tighter text-blue-400">ECOSCAN <span class="text-white">MANUAL</span></h1>
         </header>
 
+        {% if error %}
+        <div class="mb-6 px-5 py-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            ⚠️ {{ error }}
+        </div>
+        {% endif %}
+
         <!-- ── TOP ROW: same as original ── -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 flex-grow">
 
@@ -183,6 +189,33 @@
                 <div id="modalContent" class="pb-4"></div>
             </div>
         </div>
+
+        <script>
+            // Phone photos can exceed the 4.5 MB request limit on Vercel, so shrink
+            // the chosen image in the browser before it is uploaded.
+            (function () {
+                const input = document.querySelector('input[type="file"][name="file"]');
+                if (!input || !window.DataTransfer) return;
+                const MAX_SIDE = 1280;
+                input.addEventListener('change', async () => {
+                    const file = input.files && input.files[0];
+                    if (!file || !file.type.startsWith('image/')) return;
+                    try {
+                        const bmp = await createImageBitmap(file);
+                        const scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+                        const canvas = document.createElement('canvas');
+                        canvas.width  = Math.round(bmp.width * scale);
+                        canvas.height = Math.round(bmp.height * scale);
+                        canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+                        if (!blob) return;
+                        const dt = new DataTransfer();
+                        dt.items.add(new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }));
+                        input.files = dt.files;
+                    } catch (e) { /* fall back to uploading the original file */ }
+                });
+            })();
+        </script>
 
         <script>
             const BATCH_DATA = {{ batch_results | tojson }};
